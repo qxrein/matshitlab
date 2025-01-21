@@ -1,99 +1,84 @@
-// src/lib/Matrix.ts
+import { Matrix2D, SimulationError, SimulationResult } from "./types";
+
 export class Matrix {
-  private data: number[][];
+  private data: Matrix2D;
 
-  constructor(data: number[][]) {
+  constructor(data: Matrix2D = [[]]) {
     this.validateData(data);
-    this.data = data.map((row) => [...row]);
+    this.data = data;
   }
 
-  private validateData(data: number[][]) {
+  private validateData(data: Matrix2D): void {
     if (!Array.isArray(data) || !Array.isArray(data[0])) {
-      throw new Error("Invalid matrix data");
+      throw new SimulationError(
+        "Invalid matrix data: expected 2D array",
+        "validation",
+      );
     }
-
-    const rowLength = data[0].length;
-    if (!data.every((row) => row.length === rowLength)) {
-      throw new Error("All rows must have the same length");
+    const width = data[0].length;
+    if (!data.every((row) => Array.isArray(row) && row.length === width)) {
+      throw new SimulationError(
+        "Invalid matrix data: rows must have equal length",
+        "validation",
+      );
     }
   }
 
-  getRows(): number {
-    return this.data.length;
-  }
+  multiply(other: Matrix): SimulationResult<Matrix> {
+    const startTime = performance.now();
+    try {
+      if (this.data[0].length !== other.data.length) {
+        throw new SimulationError(
+          "Invalid matrix dimensions for multiplication",
+          "validation",
+        );
+      }
 
-  getCols(): number {
-    return this.data[0].length;
-  }
+      const result = new Array(this.data.length)
+        .fill(0)
+        .map(() => new Array(other.data[0].length).fill(0));
 
-  get(i: number, j: number): number {
-    if (i < 0 || i >= this.getRows() || j < 0 || j >= this.getCols()) {
-      throw new Error("Index out of bounds");
-    }
-    return this.data[i][j];
-  }
+      // Using typed arrays for better performance
+      const m = this.data.length;
+      const n = other.data[0].length;
+      const p = other.data.length;
 
-  set(i: number, j: number, value: number): void {
-    if (i < 0 || i >= this.getRows() || j < 0 || j >= this.getCols()) {
-      throw new Error("Index out of bounds");
-    }
-    this.data[i][j] = value;
-  }
-
-  add(other: Matrix): Matrix {
-    if (
-      this.getRows() !== other.getRows() ||
-      this.getCols() !== other.getCols()
-    ) {
-      throw new Error("Matrix dimensions must match");
-    }
-
-    const result = this.data.map((row, i) =>
-      row.map((val, j) => val + other.get(i, j)),
-    );
-    return new Matrix(result);
-  }
-
-  multiply(other: Matrix | number): Matrix {
-    if (typeof other === "number") {
-      const result = this.data.map((row) => row.map((val) => val * other));
-      return new Matrix(result);
-    }
-
-    if (this.getCols() !== other.getRows()) {
-      throw new Error("Invalid matrix dimensions for multiplication");
-    }
-
-    const result: number[][] = [];
-    for (let i = 0; i < this.getRows(); i++) {
-      result[i] = [];
-      for (let j = 0; j < other.getCols(); j++) {
-        let sum = 0;
-        for (let k = 0; k < this.getCols(); k++) {
-          sum += this.get(i, k) * other.get(k, j);
+      for (let i = 0; i < m; i++) {
+        for (let j = 0; j < n; j++) {
+          let sum = 0;
+          for (let k = 0; k < p; k++) {
+            sum += this.data[i][k] * other.data[k][j];
+          }
+          result[i][j] = sum;
         }
-        result[i][j] = sum;
       }
+
+      return {
+        data: new Matrix(result),
+        metadata: {
+          computationTime: performance.now() - startTime,
+          memoryUsed: result.length * result[0].length * 8,
+          precision: 64,
+          success: true,
+        },
+      };
+    } catch (error) {
+      throw new SimulationError(
+        "Matrix multiplication failed",
+        "computation",
+        error,
+      );
     }
-    return new Matrix(result);
   }
 
-  transpose(): Matrix {
-    const result = Array(this.getCols())
-      .fill(0)
-      .map(() => Array(this.getRows()).fill(0));
-
-    for (let i = 0; i < this.getRows(); i++) {
-      for (let j = 0; j < this.getCols(); j++) {
-        result[j][i] = this.data[i][j];
-      }
-    }
-    return new Matrix(result);
+  getData(): Matrix2D {
+    return this.data;
   }
 
   toString(): string {
     return (
-      "[" + this.data.map((row) => "[" + row.join(", ") + "]").join("\n ") + "]"
+      `Matrix[${this.data.length}x${this.data[0].length}]\n` +
+      this.data.map((row) => row.join("\t")).join("\n")
     );
   }
 }

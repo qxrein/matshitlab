@@ -1,49 +1,56 @@
 import { Matrix } from "./Matrix";
 import { Signal } from "./Signal";
-
-interface SignalData {
-  t: number[];
-  y: number[];
-  type: string;
-}
+import { SimulationError } from "./types/index.ts";
 
 type WorkspaceValue = Signal | Matrix | number | Function;
 
 export class Workspace {
   private variables: Map<string, WorkspaceValue>;
+  private history: string[];
 
   constructor() {
     this.variables = new Map<string, WorkspaceValue>();
+    this.history = [];
+    this.registerBuiltins();
+  }
 
-    // Add built-in functions
+  private registerBuiltins(): void {
+    // Register signal generation functions
     this.variables.set(
       "sine",
-      (freq: number, duration: number): Signal =>
-        Signal.generateSine(freq, duration),
+      (freq: number, duration: number, sampleRate: number = 44100) => {
+        const result = Signal.generateSine(freq, duration, sampleRate);
+        return result.data;
+      },
     );
 
     this.variables.set(
       "square",
-      (freq: number, duration: number): Signal =>
-        Signal.generateSquare(freq, duration),
+      (freq: number, duration: number, sampleRate: number = 44100) => {
+        const result = Signal.generateSquare(freq, duration, sampleRate);
+        return result.data;
+      },
     );
 
-    this.variables.set("matrix", (data: string): Matrix => {
-      try {
-        // Remove any whitespace from the string to ensure clean evaluation
-        const cleanData = data.replace(/\s+/g, "");
-        // Safely evaluate array literal string
-        const arrayData = new Function(`return ${cleanData}`)() as number[][];
-        return new Matrix(arrayData);
-      } catch (err) {
-        throw new Error("Invalid matrix data format");
-      }
-    });
+    this.variables.set(
+      "chirp",
+      (options: {
+        startFreq: number;
+        endFreq: number;
+        duration: number;
+        method?: "linear" | "exponential";
+        sampleRate?: number;
+      }) => {
+        const result = Signal.generateChirp(options);
+        return result.data;
+      },
+    );
+
+    this.variables.set("matrix", (data: number[][]) => new Matrix(data));
   }
 
   execute(code: string): string {
     try {
-      // Split into lines and clean up
       const lines = code
         .split("\n")
         .map((line) => line.trim())
@@ -51,29 +58,29 @@ export class Workspace {
 
       let result = "";
 
-      // Execute each non-empty, non-comment line
       for (const line of lines) {
         const lineResult = this.executeLine(this.removeInlineComments(line));
         if (lineResult) {
           result += lineResult + "\n";
+          this.history.push(line);
         }
       }
 
       return result.trim();
     } catch (err) {
-      throw new Error(
+      throw new SimulationError(
         `Execution error: ${err instanceof Error ? err.message : String(err)}`,
+        "runtime",
+        err,
       );
     }
   }
 
   private removeInlineComments(line: string): string {
-    // Remove inline comments
     const commentIndex = line.indexOf("//");
-    if (commentIndex !== -1) {
-      return line.substring(0, commentIndex).trim();
-    }
-    return line.trim();
+    return commentIndex !== -1
+      ? line.substring(0, commentIndex).trim()
+      : line.trim();
   }
 
   private executeLine(line: string): string {
@@ -83,7 +90,7 @@ export class Workspace {
       if (line.includes("=")) {
         const [varName, expression] = line.split("=").map((s) => s.trim());
         if (!varName || !expression) {
-          throw new Error("Invalid assignment");
+          throw new SimulationError("Invalid assignment", "validation");
         }
         const value = this.evaluateExpression(expression);
         this.variables.set(varName, value);
@@ -93,61 +100,20 @@ export class Workspace {
         return this.formatOutput(value);
       }
     } catch (err) {
-      throw new Error(
+      throw new SimulationError(
         `Line "${line}": ${err instanceof Error ? err.message : String(err)}`,
+        "runtime",
+        err,
       );
     }
   }
 
   private evaluateExpression(expr: string): WorkspaceValue {
-    if (!expr) throw new Error("Empty expression");
+    if (!expr) throw new SimulationError("Empty expression", "validation");
 
-    // Handle method calls (e.g., s1.add(s2))
-    if (expr.includes(".")) {
-      const [objName, methodCall] = expr.split(".");
-      const obj = this.variables.get(objName);
-      if (!obj) {
-        throw new Error(`Variable '${objName}' is not defined`);
-      }
-
-      const methodMatch = methodCall.match(/(\w+)\((.*)\)/);
-      if (!methodMatch) {
-        throw new Error(`Invalid method call: ${methodCall}`);
-      }
-
-      const [_, methodName, argsStr] = methodMatch;
-      const args = argsStr
-        ? argsStr.split(",").map((arg) => this.evaluateExpression(arg.trim()))
-        : [];
-
-      if (typeof (obj as any)[methodName] !== "function") {
-        throw new Error(`Method '${methodName}' not found on ${objName}`);
-      }
-
-      return (obj as any)[methodName].apply(obj, args);
-    }
-
-    // Handle function calls
+    // Handle function calls with arguments
     if (expr.includes("(")) {
-      const funcName = expr.split("(")[0].trim();
-      const func = this.variables.get(funcName);
-      if (typeof func !== "function") {
-        throw new Error(`Function '${funcName}' is not defined`);
-      }
-
-      const argsStr = expr
-        .slice(expr.indexOf("(") + 1, expr.lastIndexOf(")"))
-        .trim();
-
-      if (funcName === "matrix") {
-        return func(argsStr);
-      }
-
-      const args = argsStr
-        ? argsStr.split(",").map((arg) => this.evaluateExpression(arg.trim()))
-        : [];
-
-      return func(...args);
+      return this.evaluateFunctionCall(expr);
     }
 
     // Handle numbers
@@ -161,7 +127,87 @@ export class Workspace {
       return value;
     }
 
-    throw new Error(`Cannot evaluate expression: '${expr}'`);
+    throw new SimulationError(
+      `Cannot evaluate expression: '${expr}'`,
+      "validation",
+    );
+  }
+
+  private evaluateFunctionCall(expr: string): WorkspaceValue {
+    const funcName = expr.substring(0, expr.indexOf("(")).trim();
+    const argsStr = expr
+      .substring(expr.indexOf("(") + 1, this.findMatchingParenthesis(expr))
+      .trim();
+
+    const func = this.variables.get(funcName);
+    if (typeof func !== "function") {
+      throw new SimulationError(
+        `Function '${funcName}' is not defined`,
+        "validation",
+      );
+    }
+
+    // Parse arguments
+    const args = this.parseArguments(argsStr, funcName);
+    return func(...args);
+  }
+
+  private findMatchingParenthesis(expr: string): number {
+    let count = 0;
+    let startFound = false;
+
+    for (let i = 0; i < expr.length; i++) {
+      if (expr[i] === "(") {
+        startFound = true;
+        count++;
+      } else if (expr[i] === ")") {
+        count--;
+        if (startFound && count === 0) {
+          return i;
+        }
+      }
+    }
+
+    throw new SimulationError("Unmatched parentheses", "validation");
+  }
+
+  private parseArguments(argsStr: string, funcName: string): any[] {
+    if (!argsStr) return [];
+
+    if (funcName === "matrix") {
+      try {
+        return [JSON.parse(argsStr.replace(/\s+/g, ""))];
+      } catch (err) {
+        throw new SimulationError("Invalid matrix format", "validation");
+      }
+    }
+
+    // Handle object literal for chirp function
+    if (funcName === "chirp" && argsStr.startsWith("{")) {
+      try {
+        // Convert to valid JSON format
+        const jsonStr = argsStr
+          .replace(/(\w+):/g, '"$1":') // Add quotes to keys
+          .replace(/'/g, '"'); // Replace single quotes with double quotes
+        const options = JSON.parse(jsonStr);
+        return [options];
+      } catch (err) {
+        throw new SimulationError(
+          "Invalid options object format",
+          "validation",
+        );
+      }
+    }
+
+    // Handle regular comma-separated arguments
+    return argsStr.split(",").map((arg) => {
+      const trimmed = arg.trim();
+      // Try to parse as number first
+      const num = Number(trimmed);
+      if (!isNaN(num)) return num;
+      // Otherwise evaluate as expression
+      return this.evaluateExpression(trimmed);
+    });
   }
 
   private formatOutput(value: WorkspaceValue): string {
@@ -182,7 +228,7 @@ export class Workspace {
     return this.variables.get(name);
   }
 
-  setValue(name: string, value: WorkspaceValue): void {
-    this.variables.set(name, value);
+  getHistory(): string[] {
+    return [...this.history];
   }
 }
